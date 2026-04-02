@@ -1,0 +1,9 @@
+streamlit
+nest_asyncio
+python-dotenv
+langchain-groq
+streamlit-mic-recorder
+SpeechRecognition
+mcp[cli]
+mcp-use
+requests

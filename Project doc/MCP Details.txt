@@ -1,0 +1,125 @@
+1️⃣Model Context Protocol (MCP)
+Idea Behind Protocols
+•	Website-based client–server interaction
+•	Communication over HTTPS
+•	Data format: JSON
+•	APIs: REST APIs (GET / PUT / POST)
+•	Common tools: Postman
+•	Example endpoints:
+o	/login
+o	/liveclasses
+o	/courses
+________________________________________
+Evolution of AI Systems
+1. Generative AI
+•	Input → LLM → Output
+•	LLMs:
+o	LLaMA
+o	OpenAI
+o	Google Gemini
+•	Goal: Solve tasks via single-model reasoning
+2. Multi-Modal Agents (LLMs with Tools)
+•	LLM connected to external tools:
+o	Arxiv
+o	Wikipedia
+o	RAG DB
+o	DuckDuckGo Search
+•	Known as AI Agents
+•	One agent can use multiple tools
+3. LLMs + MCP
+•	MCP acts as a protocol layer
+•	Enables LLMs to:
+o	Discover tools
+o	Decide which tool to use
+o	Execute tool calls via MCP servers
+________________________________________
+MCP Components
+Core Components
+1.	MCP Host
+o	IDEs (VS Code, Cursor)
+o	Claude Desktop
+o	Applications
+2.	MCP Client
+o	Lives inside Host
+o	Talks to MCP Servers
+3.	MCP Server
+o	Exposes tools
+o	Connects to:
+	Databases
+	APIs
+	Code repositories
+Services
+•	Managed by service providers
+•	Examples: Search, DB, APIs
+________________________________________
+MCP Communication Flow
+1.	User request → MCP Host
+2.	Host sends context to LLM
+3.	LLM decides:
+o	Which tool to use
+4.	MCP Client calls MCP Server
+5.	MCP Server executes:
+o	DB query / API call
+6.	Response → LLM → Final Output
+________________________________________
+2️⃣ Agent-to-Agent Protocol (A2A)
+What is A2A?
+•	Open protocol by Google
+•	Complements MCP
+•	Enables agent-to-agent communication
+•	Designed for large-scale multi-agent systems
+________________________________________
+A2A Example (Travel Planner)
+Client Agent
+•	Goal: Plan Europe trip
+•	Constraints:
+o	Min cost
+o	Max days
+•	Task:
+o	Book flights
+o	Book hotels
+o	Create itinerary
+Remote Agents
+•	Agent B → Maps
+•	Agent C → Itinerary
+•	Agent D → Memory
+•	Agent E → Index
+Agents discover each other via:
+•	Configuration files
+•	Agent Discovery
+________________________________________
+A2A Capabilities
+•	Secure collaboration
+•	Task & state management
+•	User experience negotiation
+•	Capability discovery
+•	Uses Agent Cards
+________________________________________
+3️⃣ MCP vs A2A (Key Difference)
+MCP	A2A
+LLM ↔ Tools	Agent ↔ Agent
+Tool execution	Task delegation
+Central LLM	Distributed agents
+Protocol for tools	Protocol for collaboration
+________________________________________
+4️⃣ MCP Topics
+1.	What is MCP? (Revision)
+2.	Build MCP Server from scratch
+3.	Integrate MCP Server with Client
+4.	Connect MCP with LLMs
+5.	Docker setup & Deployment
+________________________________________
+MCP Server Responsibilities
+•	Expose tools
+•	Managed by service providers
+MCP Client Responsibilities
+•	Discover tools
+•	Execute tool calls
+________________________________________
+Supported Hosts
+•	Streamlit App
+•	FastAPI App
+•	Cursor IDE
+•	Claude Desktop
+•	MCP Inspector
+•	Terminal

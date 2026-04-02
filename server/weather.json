@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "weather": {
+      "command": "mcp",
+      "args": [
+        "run",
+        "server/weather.py"
+      ]
+    }
+  }
+}
