@@ -85,6 +85,8 @@ cd MCP-A2A-Weather-Agent
 
 ### 2. Set Up Virtual Environment
 ```bash
+set Groq API Key first
+
 python -m venv venv
 # Windows
 venv\Scripts\activate
@@ -105,7 +107,7 @@ GROQ_API_KEY=your_actual_api_key_here
 
 ### 5. Run the App
 ```bash
-streamlit run Weather_streamlit_app.py
+python -m streamlit run Weather_streamlit_app.py
 ```
 
 ---
