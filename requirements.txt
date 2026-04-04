@@ -7,3 +7,5 @@ SpeechRecognition
 mcp[cli]
 mcp-use
 requests
+langgraph
+langchain

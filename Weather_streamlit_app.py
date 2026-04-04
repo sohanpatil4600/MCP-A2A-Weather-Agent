@@ -177,10 +177,10 @@ def transcribe_audio(audio_bytes):
         err_msg = str(e) if str(e) else repr(e)
         return f"Error transcribing: {err_msg}"
 
-def get_agent(model_name="llama-3.3-70b-versatile"):
+def get_agent(model_name="llama-3.3-70b-versatile", callbacks=None):
     config_file = "server/weather.json"
     client = MCPClient.from_config_file(config_file)
-    llm = ChatGroq(model=model_name)
+    llm = ChatGroq(model=model_name, streaming=True, callbacks=callbacks)
     agent = MCPAgent(
         llm=llm,
         client=client,
@@ -589,27 +589,94 @@ with tab1:
                             else:
                                 chat_history.append(AIMessage(content=msg["content"]))
                                 
+                        from langchain_core.callbacks import AsyncCallbackHandler
+                        
+                        st.markdown("### 🧠 Agent Network Activity")
+                        agent_card_col1, agent_card_col2 = st.columns(2)
+                        with agent_card_col1:
+                            supervisor_card = st.empty()
+                            supervisor_card.info("👤 **Supervisor Agent**: Standby...")
+                        with agent_card_col2:
+                            specialist_card = st.empty()
+                            specialist_card.warning("🌩️ **Weather Specialist**: Sleeping")
+                        
+                        stream_placeholder = st.empty()
+                        
+                        import sys
+                        
+                        class UIStreamHandler(AsyncCallbackHandler):
+                            def __init__(self, placeholder):
+                                self.placeholder = placeholder
+                                self.text = ""
+                                
+                            async def on_llm_start(self, *args, **kwargs) -> None:
+                                print("\n[STREAM START]", flush=True)
+                                
+                            async def on_llm_new_token(self, token: str, **kwargs) -> None:
+                                print(f"[{token}]", end="", flush=True)  # Print each token wrapped in brackets
+                                self.text += token
+                                self.placeholder.markdown(f"""
+                                <div class='bot-message' style='border-color: #00d4ff;'>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                        <strong>👤 Supervisor Agent</strong>
+                                        <span style="font-size:0.7rem;color:#00d4ff;">✨ Synthesizing...</span>
+                                    </div>
+                                    {self.text}▌
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                            async def on_llm_end(self, *args, **kwargs) -> None:
+                                print("\n[STREAM END]", flush=True)
+                                
+                        stream_handler = UIStreamHandler(stream_placeholder)
+
                         async def run_loop_safe():
+                            from langgraph.prebuilt import create_react_agent
+                            from langchain_core.messages import HumanMessage
+                            from langchain_core.tools import tool
                             import asyncio as aio
-                            last_error = None
-                            for attempt in range(3):
-                                temp_agent = get_agent(current_model)
-                                try:
-                                    return await temp_agent.run(prompt_content, external_history=chat_history)
-                                except Exception as e:
-                                    last_error = e
-                                    # If Groq hallucinates bad tool syntax (400 code), retry up to 3 times
-                                    err_str = str(e)
-                                    if "400" in err_str or "tool_use_failed" in err_str:
-                                        if attempt < 2:
-                                            st.toast(f"🔄 LLM syntax error... Retrying ({attempt + 2}/3)", icon="🔄")
-                                            await aio.sleep(1)
-                                            continue
-                                    raise
-                                finally:
-                                    await temp_agent.close()
-                            if last_error:
-                                raise last_error
+                            
+                            @tool("ask_weather_specialist")
+                            async def ask_weather_specialist(query: str) -> str:
+                                """Delegate tasks directly to the Weather Specialist Agent."""
+                                supervisor_card.info("👤 **Supervisor Agent**: Waiting for Specialist...")
+                                specialist_card.warning("🌩️ **Weather Specialist**: Extracting MCP Data...")
+                                
+                                last_error = None
+                                for attempt in range(3):
+                                    specialist = get_agent(current_model)
+                                    try:
+                                        result = await specialist.run(query) 
+                                        specialist_card.success("🌩️ **Weather Specialist**: Task Complete!")
+                                        supervisor_card.success("👤 **Supervisor Agent**: Analyzing results...")
+                                        return result
+                                    except Exception as e:
+                                        last_error = e
+                                        await aio.sleep(1)
+                                    finally:
+                                        await specialist.close()
+                                return f"Specialist failed to retrieve data: {last_error}"
+
+                            sys_msg = "You are the elite Supervisor Agent of a multi-agent system. You DO NOT have weather data. If the user asks for weather, you MUST delegate the task to the 'ask_weather_specialist' tool. Once the specialist returns the raw data, format it beautifully and conversationally for the user."
+                            
+                            llm = ChatGroq(model=current_model, streaming=True, callbacks=[stream_handler])
+                            tools = [ask_weather_specialist]
+                            agent_executor = create_react_agent(llm, tools)
+                            
+                            supervisor_card.success("👤 **Supervisor Agent**: Processing Query...")
+                            stream_handler.text = ""
+                            
+                            try:
+                                from langchain_core.messages import SystemMessage
+                                messages_payload = [SystemMessage(content=sys_msg)] + chat_history + [HumanMessage(content=prompt_content)]
+                                response_obj = await agent_executor.ainvoke({"messages": messages_payload})
+                                response_text = response_obj["messages"][-1].content
+                            except Exception as e:
+                                response_text = f"Agent Orchestration Error: {e}"
+                                
+                            supervisor_card.success("👤 **Supervisor Agent**: Finished.")
+                            stream_placeholder.empty()
+                            return response_text
 
                         # Run the MCP Agent with isolated event loop
                         response = asyncio.run(run_loop_safe())
