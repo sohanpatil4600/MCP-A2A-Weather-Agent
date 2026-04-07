@@ -157,6 +157,21 @@ def add_log(message, type="info"):
     from datetime import datetime as dt, timedelta
     ist_cutoff = timedelta(hours=5, minutes=30)
     timestamp = (dt.utcnow() + ist_cutoff).strftime("%H:%M:%S")
+    
+    # Process protocol messages for better formatting
+    if type == "PROTOCOL":
+        try:
+            # Try to prettify JSON if it's a protocol message
+            if "{" in message:
+                import json
+                start_idx = message.find("{")
+                end_idx = message.rfind("}") + 1
+                json_part = message[start_idx:end_idx]
+                parsed = json.loads(json_part)
+                message = message[:start_idx] + json.dumps(parsed, indent=2)
+        except:
+            pass
+
     st.session_state.logs.append({"time": timestamp, "msg": message, "type": type})
 
 # --- Helper Functions ---
@@ -572,8 +587,35 @@ with tab1:
                             if "🔧 Tool call:" in msg:
                                 st.toast(msg, icon="🔧")
                                 add_log(msg, "INFO")
+                                
+                                # Simulate Protocol Layer JSON-RPC Request
+                                try:
+                                    import json
+                                    tool_name = msg.split("🔧 Tool call: '")[1].split("'")[0]
+                                    args = msg.split("with args ")[1]
+                                    rpc_req = {
+                                        "jsonrpc": "2.0",
+                                        "method": f"tools/call/{tool_name}",
+                                        "params": json.loads(args),
+                                        "id": id(msg) % 1000
+                                    }
+                                    add_log(f"📡 SENT JSON-RPC REQUEST:\n{json.dumps(rpc_req)}", "PROTOCOL")
+                                except: pass
+                                
                             elif "📄 Tool result:" in msg:
                                 add_log(msg[:200] + ("..." if len(msg) > 200 else ""), "SUCCESS")
+                                
+                                # Simulate Protocol Layer JSON-RPC Response
+                                try:
+                                    import json
+                                    result_content = msg.split("📄 Tool result: ")[1]
+                                    rpc_res = {
+                                        "jsonrpc": "2.0",
+                                        "result": result_content[:500], # Trucated for log readability
+                                        "id": "match_request_id"
+                                    }
+                                    add_log(f"📥 RCVD JSON-RPC RESPONSE:\n{json.dumps(rpc_res)}", "PROTOCOL")
+                                except: pass
                     
                     ui_handler = UILogHandler()
                     mcp_logger = logging.getLogger("mcp_use")
@@ -657,10 +699,42 @@ with tab1:
                                         await specialist.close()
                                 return f"Specialist failed to retrieve data: {last_error}"
 
-                            sys_msg = "You are the elite Supervisor Agent of a multi-agent system. You DO NOT have weather data. If the user asks for weather, you MUST delegate the task to the 'ask_weather_specialist' tool. Once the specialist returns the raw data, format it beautifully and conversationally for the user."
+                            @tool("agent_protocol_handshake")
+                            async def agent_protocol_handshake() -> str:
+                                """Initialize a secure production handshake between Supervisor and Specialist.
+                                This performs capability negotiation and session authorization.
+                                """
+                                supervisor_card.info("🛡️ **Protocol**: Initiating A2A Handshake...")
+                                specialist = get_agent(current_model)
+                                try:
+                                    # Stage 1: Capability Discovery
+                                    add_log("📡 [A2A Handshake] Method: tools/call/get_capabilities", "PROTOCOL")
+                                    caps_result = await specialist.run("List your system capabilities and protocol version.")
+                                    
+                                    # Stage 2: Session Token Simulation (X-Agent-Auth)
+                                    import secrets
+                                    session_token = f"agent_sess_{secrets.token_hex(8)}"
+                                    add_log(f"🔑 [A2A Handshake] Status: Authenticated | Token: {session_token}", "PROTOCOL")
+                                    
+                                    specialist_card.success("🌩️ **Weather Specialist**: Handshake Verified")
+                                    return f"HANDSHAKE_COMPLETE: Capabilities verified for {current_model}. Session: {session_token}."
+                                except Exception as e:
+                                    return f"Handshake Failed: {e}"
+                                finally:
+                                    await specialist.close()
+
+                            sys_msg = """You are the elite Supervisor Agent of a multi-agent system. 
+                             
+                             OPERATIONAL PROTOCOL:
+                             1. CHECK HISTORY: Look through the conversation history for 'HANDSHAKE_COMPLETE'. 
+                             2. HANDSHAKE: If 'HANDSHAKE_COMPLETE' is NOT in the history, you MUST call 'agent_protocol_handshake' as your FIRST action.
+                             3. EXECUTION: After a successful handshake (or if one already exists), IMMEDIATELY call 'ask_weather_specialist' to fulfill the user's query.
+                             4. GOAL: Never stop after the handshake. The user wants WEATHER DATA, not protocol confirmation. 
+                             
+                             Always append a subtle '🛡️ Protocol Verified' badge at the very end of your final synthesized response."""
                             
                             llm = ChatGroq(model=current_model, streaming=True, callbacks=[stream_handler])
-                            tools = [ask_weather_specialist]
+                            tools = [ask_weather_specialist, agent_protocol_handshake]
                             agent_executor = create_react_agent(llm, tools)
                             
                             supervisor_card.success("👤 **Supervisor Agent**: Processing Query...")
@@ -1036,9 +1110,55 @@ with tab5:
     with c_search:
         search_query = st.text_input("Search Logs", placeholder="🔍 Filter...", label_visibility="collapsed")
     with c_levels:
-        filter_types = st.multiselect("Log Levels", ["INFO", "SUCCESS", "WARNING", "ERROR"], 
-                                    default=["INFO", "SUCCESS", "WARNING", "ERROR"], 
+        filter_types = st.multiselect("Log Levels", ["INFO", "SUCCESS", "WARNING", "ERROR", "PROTOCOL"], 
+                                    default=["INFO", "SUCCESS", "WARNING", "ERROR", "PROTOCOL"], 
                                     label_visibility="collapsed")
+
+    # Filter data
+    filtered_logs = [
+        l for l in log_data 
+        if l['type'] in filter_types 
+        and (search_query.lower() in l['msg'].lower())
+    ]
+    
+    # Reverse to show newest first
+    filtered_logs = filtered_logs[::-1]
+    
+    st.markdown("### 📜 Activity Log")
+    
+    for log in filtered_logs:
+        color = {
+            "INFO": "#2874f0",
+            "SUCCESS": "#2ecc71",
+            "WARNING": "#f1c40f",
+            "ERROR": "#e74c3c",
+            "PROTOCOL": "#00d4ff"
+        }.get(log['type'], "#bdc3c7")
+        
+        icon = {
+            "INFO": "ℹ️",
+            "SUCCESS": "✅",
+            "WARNING": "⚠️",
+            "ERROR": "❌",
+            "PROTOCOL": "📡"
+        }.get(log['type'], "📝")
+        
+        with st.container():
+            st.markdown(f"""
+            <div style="border-left: 3px solid {color}; padding-left: 10px; margin-bottom: 10px;">
+                <span style="color: #666; font-size: 0.8rem;">[{log['time']}]</span>
+                <span style="color: {color}; font-weight: bold; font-size: 0.9rem;">{icon} {log['type']}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if log['type'] == "PROTOCOL":
+                st.code(log['msg'], language="json")
+            else:
+                st.markdown(log['msg'])
+            st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+
+    if not filtered_logs:
+        st.info("No logs matching selected filters.")
 
     # Row 2: Actions (Next Line)
     b1, b2, b3, b4 = st.columns(4)

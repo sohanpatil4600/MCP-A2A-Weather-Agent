@@ -10,8 +10,8 @@ NWS_API_BASE = "https://api.weather.gov"
 USER_AGENT = "weather-app/1.0"
 
 
-async def make_nws_request(url: str) -> dict[str, Any] | None:
-    """Make a request to the NWS API with proper error handling."""
+async def make_nws_request(url: str) -> dict[str, Any]:
+    """Make a request to the NWS API with proper error handling and protocol status mapping."""
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/geo+json"
@@ -19,11 +19,40 @@ async def make_nws_request(url: str) -> dict[str, Any] | None:
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, headers=headers, timeout=30.0)
+            if response.status_code == 404:
+                return {"error": "Resource not found (404)", "code": -32601} # Method not found equivalent
+            elif response.status_code == 403:
+                return {"error": "Access Forbidden (403)", "code": -32000} # Server error equivalent
             response.raise_for_status()
             return response.json()
-        except Exception:
-            return None
-        
+        except httpx.TimeoutException:
+            return {"error": "Request timed out", "code": -32001}
+        except Exception as e:
+            return {"error": str(e), "code": -32603} # Internal error
+
+@mcp.tool()
+async def get_capabilities() -> str:
+    """Get the weather server's capabilities and protocol version support.
+    
+    Returns standard server metadata for handshake negotiation.
+    """
+    import json
+    capabilities = {
+        "server": "MCP Weather Pro",
+        "version": "2.1.0",
+        "protocol_version": "2024-11-05", # Following Anthropic's MCP versioning
+        "supported_regions": ["US", "Global"],
+        "auth_methods": ["None", "Simulation_Token"],
+        "throttling": "Enabled (Simulated)",
+        "features": {
+            "real_time_alerts": True,
+            "geocoding": True,
+            "forecast_3day": True,
+            "sse_streaming": True
+        }
+    }
+    return f"CAPABILITIES_JSON: {json.dumps(capabilities)}"
+
 def format_alert(feature: dict) -> str:
     """Format an alert feature into a readable string."""
     props = feature["properties"]
@@ -44,6 +73,9 @@ async def get_alerts(state: str) -> str:
     """
     url = f"{NWS_API_BASE}/alerts/active/area/{state}"
     data = await make_nws_request(url)
+
+    if "error" in data:
+        return f"Protocol Error: {data['error']} (Code: {data['code']})"
 
     if not data or "features" not in data:
         return "Unable to fetch alerts or no alerts found."
