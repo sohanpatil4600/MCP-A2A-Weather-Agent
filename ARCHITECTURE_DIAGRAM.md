@@ -9,8 +9,8 @@ flowchart LR
     U[User] -->|Text or Voice| ST[Weather_streamlit_app.py\nStreamlit Host UI]
 
     subgraph AppState[Streamlit Session State]
-      MSG[messages[]]
-      LOGS[logs[]]
+      MSG[messages list]
+      LOGS[logs list]
       IDEMP[SQLiteA2AIdempotencyStore\nWeather result/a2a_idempotency.db]
       RESCTX[ResilienceContext]
       OBSCTX[ObservabilityContext]
