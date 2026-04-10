@@ -34,7 +34,7 @@ flowchart LR
     AWS --> RESCTX
     AWS --> OBSCTX
 
-    AWS -->|specialist.run(query)| MCPUSE
+    AWS -->|specialist run query| MCPUSE
     MCPUSE -->|MCP transport| WS[FastMCP Server\nserver/weather.py]
     WS --> SEC[PolicyEngine\nserver/security.py]
     WS -->|US alerts| NWS[api.weather.gov]

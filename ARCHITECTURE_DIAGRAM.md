@@ -36,7 +36,7 @@ flowchart LR
     AWS --> RESCTX
     AWS --> OBSCTX
 
-    AWS -->|specialist.run(query)| MCPUSE
+    AWS -->|specialist run query| MCPUSE
 
     MCPUSE -->|MCP transport| WS[server/weather.py FastMCP Server]
     WS --> SEC[server/security.py PolicyEngine]
@@ -51,7 +51,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph server/weather.py
-      W0[mcp = FastMCP("weather")]
+  W0[mcp FastMCP weather]
       W1[ProtocolError]
       W2[TOOL_CONTRACTS + protocol constants]
       W3[_serialize_ok / _serialize_error]
