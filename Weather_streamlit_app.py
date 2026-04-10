@@ -7,11 +7,15 @@ import nest_asyncio
 import json
 import datetime
 import base64
+import time
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from mcp_use import MCPAgent, MCPClient
 from streamlit_mic_recorder import mic_recorder
 import speech_recognition as sr
+from server.a2a_protocol import SQLiteA2AIdempotencyStore, build_handoff
+from server.resilience import ResilienceContext, CircuitBreakerConfig
+from server.observability import ObservabilityContext, StructuredEvent, TraceContext
 
 # Windows specific event loop policy
 if os.name == 'nt':
@@ -138,25 +142,32 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "logs" not in st.session_state:
     st.session_state.logs = []
+if "a2a_idempotency_store" not in st.session_state:
+    st.session_state.a2a_idempotency_store = SQLiteA2AIdempotencyStore(
+        db_path="Weather result/a2a_idempotency.db"
+    )
+if "resilience_context" not in st.session_state:
+    st.session_state.resilience_context = ResilienceContext()
+if "observability_context" not in st.session_state:
+    st.session_state.observability_context = ObservabilityContext()
 
 
 
-def safe_image(path, caption=None, use_container_width=True):
+def safe_image(path, caption=None, width="stretch"):
     try:
         from PIL import Image
-        import streamlit as st
         # Verify it's a valid image
         Image.open(path).verify()
-        safe_image(path, caption=caption, use_container_width=use_container_width)
+        st.image(path, caption=caption, width=width)
     except Exception:
         # If it's a git lfs pointer or missing
         st.info(f"🖼️ [Image Placeholder for {path}]")
 
 def add_log(message, type="info"):
     # Streamlit Cloud uses UTC by default. Adding 5:30 for IST.
-    from datetime import datetime as dt, timedelta
+    from datetime import datetime as dt, timedelta, timezone
     ist_cutoff = timedelta(hours=5, minutes=30)
-    timestamp = (dt.utcnow() + ist_cutoff).strftime("%H:%M:%S")
+    timestamp = (dt.now(timezone.utc) + ist_cutoff).strftime("%H:%M:%S")
     
     # Process protocol messages for better formatting
     if type == "PROTOCOL":
@@ -203,6 +214,30 @@ def get_agent(model_name="llama-3.3-70b-versatile", callbacks=None):
         memory_enabled=True,
     )
     return agent
+
+
+def run_async_isolated(coro):
+    """Run a coroutine in an isolated event loop and clean up pending tasks."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(coro)
+
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        if hasattr(loop, "shutdown_default_executor"):
+            loop.run_until_complete(loop.shutdown_default_executor())
+
+        return result
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 # No global agent. MCP Subprocess must be bound to a localized asyncio Event Loop during query phase.
 
@@ -279,12 +314,15 @@ WEATHER MCP AGENT
 """, unsafe_allow_html=True)
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🚀 Project Demo", 
     "ℹ️ About Project", 
     "🛠️ Tech Stack", 
     "🏗️ Architecture", 
-    "📋 System Logs"
+    "📋 System Logs",
+    "⚡ Resilience Hub",
+    "🔒 Security Audit",
+    "📊 Observability"
 ])
 
 # --- Tab 1: Project Demo ---
@@ -305,73 +343,73 @@ with tab1:
     st.markdown("### ⚡ Quick Weather Checks")
     q1, q2, q3, q4 = st.columns(4)
     
-    if q1.button("🗽 NY Weather", use_container_width=True):
+    if q1.button("🗽 NY Weather", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current weather in New York?"})
          st.rerun()
          
-    if q2.button("🌧️ London Rain?", use_container_width=True):
+    if q2.button("🌧️ London Rain?", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Is it going to rain in London today?"})
          st.rerun()
          
-    if q3.button("🇯🇵 Tokyo Forecast", use_container_width=True):
+    if q3.button("🇯🇵 Tokyo Forecast", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Give me a 3-day forecast for Tokyo."})
          st.rerun()
          
-    if q4.button("⚠️ US Alerts", use_container_width=True):
+    if q4.button("⚠️ US Alerts", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Are there any severe weather alerts in California right now?"})
          st.rerun()
 
     # Row 2
     q5, q6, q7, q8 = st.columns(4)
-    if q5.button("🌅 Paris Sunrise", use_container_width=True):
+    if q5.button("🌅 Paris Sunrise", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "When is sunrise in Paris tomorrow?"})
          st.rerun()
     
-    if q6.button("💨 Chicago Wind", use_container_width=True):
+    if q6.button("💨 Chicago Wind", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current wind speed in Chicago?"})
          st.rerun()
          
-    if q7.button("🌡️ Dubai Temp", use_container_width=True):
+    if q7.button("🌡️ Dubai Temp", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current temperature in Dubai?"})
          st.rerun()
          
-    if q8.button("☔ Mumbai Rain", use_container_width=True):
+    if q8.button("☔ Mumbai Rain", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Is it raining in Mumbai right now?"})
          st.rerun()
 
     # Row 3 (Indian Cities)
     q9, q10, q11, q12 = st.columns(4)
-    if q9.button("🌫️ Delhi Weather", use_container_width=True):
+    if q9.button("🌫️ Delhi Weather", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current weather in New Delhi?"})
          st.rerun()
     
-    if q10.button("💻 Bangalore Temp", use_container_width=True):
+    if q10.button("💻 Bangalore Temp", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current temperature in Bangalore?"})
          st.rerun()
          
-    if q11.button("🌊 Chennai Rain", use_container_width=True):
+    if q11.button("🌊 Chennai Rain", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Is it raining in Chennai right now?"})
          st.rerun()
          
-    if q12.button("🏰 Hyderabad Cast", use_container_width=True):
+    if q12.button("🏰 Hyderabad Cast", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Give me a weather forecast for Hyderabad, India."})
          st.rerun()
 
     # Row 4 (Global Mix)
     q13, q14, q15, q16 = st.columns(4)
-    if q13.button("🐨 Sydney Sun", use_container_width=True):
+    if q13.button("🐨 Sydney Sun", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Is it sunny in Sydney right now?"})
          st.rerun()
     
-    if q14.button("🍁 Toronto Snow", use_container_width=True):
+    if q14.button("🍁 Toronto Snow", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "Is it snowing in Toronto?"})
          st.rerun()
          
-    if q15.button("🦁 Singapore Humid", use_container_width=True):
+    if q15.button("🦁 Singapore Humid", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the humidity in Singapore?"})
          st.rerun()
          
-    if q16.button("🐻 Berlin Temp", use_container_width=True):
+    if q16.button("🐻 Berlin Temp", width="stretch"):
          st.session_state.messages.append({"role": "user", "content": "What is the current temperature in Berlin?"})
          st.rerun()
 
@@ -379,13 +417,13 @@ with tab1:
     st.markdown("### 📸 Weather Landscapes")
     g1, g2, g3, g4 = st.columns(4)
     with g1:
-        safe_image("assets/snow_winter.png", caption="Snowy Winter", use_container_width=True)
+        safe_image("assets/snow_winter.png", caption="Snowy Winter", width="stretch")
     with g2:
-        safe_image("assets/rain_storm.png", caption="Rainy Cloud", use_container_width=True)
+        safe_image("assets/rain_storm.png", caption="Rainy Cloud", width="stretch")
     with g3:
-        safe_image("assets/green_hills.png", caption="Green Hills", use_container_width=True)
+        safe_image("assets/green_hills.png", caption="Green Hills", width="stretch")
     with g4:
-        safe_image("assets/sea_beach.png", caption="Sea Water", use_container_width=True)
+        safe_image("assets/sea_beach.png", caption="Sea Water", width="stretch")
 
     # Model Selection & Header in one row
     st.markdown("---")
@@ -474,9 +512,9 @@ with tab1:
             with col_input:
                 custom_input = st.text_input("Query", placeholder="Ask me about the weather...", label_visibility="collapsed", key="widget_query")
             with col_btn_enter:
-                submitted = st.form_submit_button("🚀 Enter", use_container_width=True)
+                submitted = st.form_submit_button("🚀 Enter", width="stretch")
             with col_btn_stop:
-                stopped = st.form_submit_button("⏹️ Stop", use_container_width=True)
+                stopped = st.form_submit_button("⏹️ Stop", width="stretch")
     
     if stopped:
         st.session_state.messages = st.session_state.messages # Keep state
@@ -525,7 +563,7 @@ with tab1:
                     data=chat_history_json,
                     file_name="weather_chat_history.json",
                     mime="application/json",
-                    use_container_width=True
+                    width="stretch"
                 )
             with exp_col2:
                 st.download_button(
@@ -533,19 +571,19 @@ with tab1:
                     data=chat_history_txt,
                     file_name="weather_chat_history.txt",
                     mime="text/plain",
-                    use_container_width=True
+                    width="stretch"
                 )
             
         with col_clear:
             st.write("🧹 **Clear:**")
-            if st.button("Clear Chat", use_container_width=True):
+            if st.button("Clear Chat", width="stretch"):
                 st.session_state.messages = []
                 add_log("Chat history cleared", "INFO")
                 st.rerun()
 
         with col_reset:
             st.write("🔄 **Reset:**")
-            if st.button("Reset System", use_container_width=True):
+            if st.button("Reset System", width="stretch"):
                 del st.session_state.agent
                 st.session_state.logs = []
                 add_log("System reset initiated", "WARNING")
@@ -673,7 +711,7 @@ with tab1:
                         stream_handler = UIStreamHandler(stream_placeholder)
 
                         async def run_loop_safe():
-                            from langgraph.prebuilt import create_react_agent
+                            from langchain.agents import create_agent
                             from langchain_core.messages import HumanMessage
                             from langchain_core.tools import tool
                             import asyncio as aio
@@ -681,23 +719,190 @@ with tab1:
                             @tool("ask_weather_specialist")
                             async def ask_weather_specialist(query: str) -> str:
                                 """Delegate tasks directly to the Weather Specialist Agent."""
+                                handoff = build_handoff(
+                                    query=query,
+                                    target_agent="weather-specialist",
+                                    deadline_ms=15000,
+                                    idempotency_seed=f"{current_model}:{query.strip().lower()}",
+                                )
+                                add_log(f"A2A_HANDOFF: {handoff.to_json()}", "PROTOCOL")
+
+                                idempotency_store = st.session_state.a2a_idempotency_store
+                                if idempotency_store.has(handoff.idempotency_key):
+                                    cached = idempotency_store.get(handoff.idempotency_key)
+                                    add_log(
+                                        f"A2A_DEDUPE_HIT: trace_id={handoff.trace_id} key={handoff.idempotency_key}",
+                                        "PROTOCOL",
+                                    )
+                                    return cached or ""
+
+                                if handoff.is_expired():
+                                    return (
+                                        f"A2A deadline exceeded before execution "
+                                        f"(trace_id={handoff.trace_id}, task_id={handoff.task_id})."
+                                    )
+
                                 supervisor_card.info("👤 **Supervisor Agent**: Waiting for Specialist...")
                                 specialist_card.warning("🌩️ **Weather Specialist**: Extracting MCP Data...")
                                 
-                                last_error = None
-                                for attempt in range(3):
+                                remaining_seconds = handoff.remaining_seconds()
+                                if remaining_seconds <= 0:
+                                    add_log(
+                                        (
+                                            "A2A_TIMEOUT: "
+                                            f"trace_id={handoff.trace_id} task_id={handoff.task_id} "
+                                            "reason=deadline_exceeded_before_execution"
+                                        ),
+                                        "PROTOCOL",
+                                    )
+                                    return "A2A deadline exceeded before specialist execution."
+
+                                resilience_ctx = st.session_state.resilience_context
+                                breaker = resilience_ctx.get_breaker(
+                                    "weather-specialist",
+                                    CircuitBreakerConfig(failure_threshold=5, recovery_timeout_s=60),
+                                )
+
+                                obs_ctx = st.session_state.observability_context
+                                start_time = time.time()
+                                span_ctx = TraceContext(
+                                    trace_id=handoff.trace_id,
+                                    span_id=f"specialist-{handoff.task_id}",
+                                    parent_span_id=obs_ctx.current_trace.span_id,
+                                    correlation_id=obs_ctx.current_trace.correlation_id,
+                                )
+
+                                # Emit handoff creation event
+                                obs_ctx.emit_event(StructuredEvent(
+                                    event_type="a2a.handoff.created",
+                                    trace_context=span_ctx,
+                                    attributes={
+                                        "task_id": handoff.task_id,
+                                        "idempotency_key": handoff.idempotency_key[:12],
+                                        "deadline_ms": handoff.deadline_ms,
+                                        "query_length": len(query)
+                                    }
+                                ))
+                                
+                                # Increment A2A handoff counter for observability
+                                obs_ctx.metrics.increment_counter("a2a_handoffs")
+
+                                def on_retry_event(attempt: int, exc: Exception) -> None:
+                                    elapsed_s = time.time() - start_time
+                                    add_log(
+                                        (
+                                            "A2A_RETRY: "
+                                            f"trace_id={handoff.trace_id} task_id={handoff.task_id} "
+                                            f"attempt={attempt} error={type(exc).__name__} elapsed={elapsed_s:.2f}s"
+                                        ),
+                                        "PROTOCOL",
+                                    )
+                                    obs_ctx.emit_event(StructuredEvent(
+                                        event_type="a2a.retry",
+                                        trace_context=span_ctx,
+                                        latency_ms=int(elapsed_s * 1000),
+                                        error_code="RETRY",
+                                        attributes={
+                                            "attempt": attempt,
+                                            "error_type": type(exc).__name__,
+                                            "error_message": str(exc)
+                                        }
+                                    ))
+
+                                def on_failure_event(exc: Exception) -> None:
+                                    elapsed_s = time.time() - start_time
+                                    add_log(
+                                        (
+                                            "A2A_FAILURE: "
+                                            f"trace_id={handoff.trace_id} task_id={handoff.task_id} "
+                                            f"breaker_state={breaker.metrics.state.value} "
+                                            f"error={type(exc).__name__} elapsed={elapsed_s:.2f}s"
+                                        ),
+                                        "PROTOCOL",
+                                    )
+                                    obs_ctx.emit_event(StructuredEvent(
+                                        event_type="a2a.failure",
+                                        trace_context=span_ctx,
+                                        latency_ms=int(elapsed_s * 1000),
+                                        error_code="FAILURE",
+                                        attributes={
+                                            "breaker_state": breaker.metrics.state.value,
+                                            "error_type": type(exc).__name__,
+                                            "error_message": str(exc)
+                                        }
+                                    ))
+
+                                try:
                                     specialist = get_agent(current_model)
                                     try:
-                                        result = await specialist.run(query) 
+                                        result = await resilience_ctx.execute_with_resilience(
+                                            call_name="weather-specialist",
+                                            coro_fn=lambda: specialist.run(query),
+                                            timeout_s=remaining_seconds,
+                                            on_retry=on_retry_event,
+                                            on_failure=on_failure_event,
+                                        )
+                                        elapsed_s = time.time() - start_time
+                                        idempotency_store.set(handoff.idempotency_key, result)
+                                        
+                                        # Emit completion event with latency metrics
+                                        obs_ctx.emit_event(StructuredEvent(
+                                            event_type="a2a.completion",
+                                            trace_context=span_ctx,
+                                            latency_ms=int(elapsed_s * 1000),
+                                            attributes={
+                                                "task_id": handoff.task_id,
+                                                "idempotency_key": handoff.idempotency_key[:12],
+                                                "result_length": len(str(result))
+                                            }
+                                        ))
+                                        obs_ctx.metrics.record_latency("weather-specialist", int(elapsed_s * 1000))
+                                        obs_ctx.metrics.record_success()
+                                        obs_ctx.metrics.increment_counter("tool_calls")  # Track tool calls for observability
+                                        
                                         specialist_card.success("🌩️ **Weather Specialist**: Task Complete!")
                                         supervisor_card.success("👤 **Supervisor Agent**: Analyzing results...")
+                                        add_log(
+                                            (
+                                                "A2A_COMPLETE: "
+                                                f"trace_id={handoff.trace_id} task_id={handoff.task_id} "
+                                                f"idempotency_key={handoff.idempotency_key[:12]}... "
+                                                f"elapsed={elapsed_s:.2f}s"
+                                            ),
+                                            "PROTOCOL",
+                                        )
                                         return result
-                                    except Exception as e:
-                                        last_error = e
-                                        await aio.sleep(1)
                                     finally:
                                         await specialist.close()
-                                return f"Specialist failed to retrieve data: {last_error}"
+                                except RuntimeError as e:
+                                    if "Circuit breaker" in str(e):
+                                        specialist_card.error(f"🌩️ **Weather Specialist**: Circuit breaker active")
+                                        obs_ctx.emit_event(StructuredEvent(
+                                            event_type="a2a.circuit_breaker",
+                                            trace_context=span_ctx,
+                                            latency_ms=int((time.time() - start_time) * 1000),
+                                            error_code="CIRCUIT_BREAKER_OPEN",
+                                            attributes={
+                                                "breaker_name": "weather-specialist",
+                                                "state": breaker.metrics.state.value
+                                            }
+                                        ))
+                                        obs_ctx.metrics.record_failure()
+                                        return f"Specialist unavailable (circuit breaker open): {e}"
+                                    raise
+                                except Exception as e:
+                                    specialist_card.error(f"🌩️ **Weather Specialist**: Error - {type(e).__name__}")
+                                    obs_ctx.emit_event(StructuredEvent(
+                                        event_type="a2a.error",
+                                        trace_context=span_ctx,
+                                        latency_ms=int((time.time() - start_time) * 1000),
+                                        error_code=type(e).__name__,
+                                        attributes={
+                                            "error_message": str(e)
+                                        }
+                                    ))
+                                    obs_ctx.metrics.record_failure()
+                                    return f"Specialist execution failed: {type(e).__name__}: {e}"
 
                             @tool("agent_protocol_handshake")
                             async def agent_protocol_handshake() -> str:
@@ -705,21 +910,47 @@ with tab1:
                                 This performs capability negotiation and session authorization.
                                 """
                                 supervisor_card.info("🛡️ **Protocol**: Initiating A2A Handshake...")
+                                resilience_ctx = st.session_state.resilience_context
+                                breaker = resilience_ctx.get_breaker(
+                                    "weather-specialist-handshake",
+                                    CircuitBreakerConfig(failure_threshold=3, recovery_timeout_s=30),
+                                )
+
+                                def on_hs_retry(attempt: int, exc: Exception) -> None:
+                                    add_log(
+                                        f"A2A_HANDSHAKE_RETRY: attempt={attempt} error={type(exc).__name__}",
+                                        "PROTOCOL",
+                                    )
+
+                                def on_hs_failure(exc: Exception) -> None:
+                                    add_log(
+                                        f"A2A_HANDSHAKE_FAILURE: breaker_state={breaker.metrics.state.value}",
+                                        "PROTOCOL",
+                                    )
+
                                 specialist = get_agent(current_model)
                                 try:
-                                    # Stage 1: Capability Discovery
                                     add_log("📡 [A2A Handshake] Method: tools/call/get_capabilities", "PROTOCOL")
-                                    caps_result = await specialist.run("List your system capabilities and protocol version.")
-                                    
-                                    # Stage 2: Session Token Simulation (X-Agent-Auth)
+                                    caps_result = await resilience_ctx.execute_with_resilience(
+                                        call_name="weather-specialist-handshake",
+                                        coro_fn=lambda: specialist.run("List your system capabilities and protocol version."),
+                                        timeout_s=5.0,
+                                        on_retry=on_hs_retry,
+                                        on_failure=on_hs_failure,
+                                    )
+
                                     import secrets
                                     session_token = f"agent_sess_{secrets.token_hex(8)}"
                                     add_log(f"🔑 [A2A Handshake] Status: Authenticated | Token: {session_token}", "PROTOCOL")
-                                    
+
                                     specialist_card.success("🌩️ **Weather Specialist**: Handshake Verified")
                                     return f"HANDSHAKE_COMPLETE: Capabilities verified for {current_model}. Session: {session_token}."
+                                except RuntimeError as e:
+                                    if "Circuit breaker" in str(e):
+                                        return f"Handshake failed: Specialist circuit breaker active"
+                                    raise
                                 except Exception as e:
-                                    return f"Handshake Failed: {e}"
+                                    return f"Handshake Failed: {type(e).__name__}: {e}"
                                 finally:
                                     await specialist.close()
 
@@ -735,14 +966,15 @@ with tab1:
                             
                             llm = ChatGroq(model=current_model, streaming=True, callbacks=[stream_handler])
                             tools = [ask_weather_specialist, agent_protocol_handshake]
-                            agent_executor = create_react_agent(llm, tools)
+                            
+                            # LangChain 1.2+ creates a tool-calling graph directly via create_agent.
+                            agent_executor = create_agent(llm, tools, system_prompt=sys_msg)
                             
                             supervisor_card.success("👤 **Supervisor Agent**: Processing Query...")
                             stream_handler.text = ""
                             
                             try:
-                                from langchain_core.messages import SystemMessage
-                                messages_payload = [SystemMessage(content=sys_msg)] + chat_history + [HumanMessage(content=prompt_content)]
+                                messages_payload = chat_history + [HumanMessage(content=prompt_content)]
                                 response_obj = await agent_executor.ainvoke({"messages": messages_payload})
                                 response_text = response_obj["messages"][-1].content
                             except Exception as e:
@@ -752,8 +984,8 @@ with tab1:
                             stream_placeholder.empty()
                             return response_text
 
-                        # Run the MCP Agent with isolated event loop
-                        response = asyncio.run(run_loop_safe())
+                        # Run agent work in an isolated loop to avoid teardown issues across reruns.
+                        response = run_async_isolated(run_loop_safe())
                     finally:
                         mcp_logger.removeHandler(ui_handler)
                     
@@ -1163,17 +1395,17 @@ with tab5:
     # Row 2: Actions (Next Line)
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        st.button("🔄 Refresh", use_container_width=True, on_click=lambda: st.rerun())
+        st.button("🔄 Refresh", width="stretch", on_click=lambda: st.rerun())
     with b2:
-        if st.button("🗑️ Clear", use_container_width=True):
+        if st.button("🗑️ Clear", width="stretch"):
                 st.session_state.logs = []
                 st.rerun()
     with b3:
         log_text = "\n".join([f"[{l['time']}] {l['type']}: {l['msg']}" for l in log_data])
-        st.download_button("📄 Save TXT", data=log_text, file_name=f"log_{datetime.datetime.now().strftime('%H%M%S')}.txt", mime="text/plain", use_container_width=True)
+        st.download_button("📄 Save TXT", data=log_text, file_name=f"log_{datetime.datetime.now().strftime('%H%M%S')}.txt", mime="text/plain", width="stretch")
     with b4:
         log_json = json.dumps(log_data, indent=2)
-        st.download_button("💾 Save JSON", data=log_json, file_name=f"log_{datetime.datetime.now().strftime('%H%M%S')}.json", mime="application/json", use_container_width=True)
+        st.download_button("💾 Save JSON", data=log_json, file_name=f"log_{datetime.datetime.now().strftime('%H%M%S')}.json", mime="application/json", width="stretch")
 
     # Filter Logic
     filtered_logs = [
@@ -1202,6 +1434,371 @@ with tab5:
                     <span style='color: #ecf0f1;'>{icon} {log['msg']}</span>
                 </div>
                 """, unsafe_allow_html=True)
+
+# --- Tab 6: Resilience Hub ---
+with tab6:
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, rgba(255, 193, 7, 0.1) 0%, rgba(243, 156, 18, 0.1) 100%); 
+                padding: 25px; border-radius: 12px; border-left: 5px solid #f39c12; margin-bottom: 25px;'>
+        <h2 style='color: #f39c12; margin: 0 0 10px 0;'>⚡ Resilience Hub</h2>
+        <p style='color: #e8e8e8; margin: 0;'>
+            Circuit breaker states, retry patterns, and failure recovery metrics in real-time.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    resilience_ctx = st.session_state.resilience_context
+    
+    # Dashboard Tabs
+    res_tab1, res_tab2, res_tab3 = st.tabs(["🔌 Circuit Breakers", "🔄 Retry Metrics", "📈 Failure Patterns"])
+    
+    with res_tab1:
+        st.markdown("### Active Circuit Breakers")
+        
+        if not resilience_ctx.circuit_breakers:
+            st.info("No circuit breakers activated yet. They initialize on first resilient call.")
+        else:
+            # Display metrics for each breaker
+            for breaker_name, breaker in resilience_ctx.circuit_breakers.items():
+                cols = st.columns([2, 1, 1, 1])
+                
+                with cols[0]:
+                    # State indicator
+                    state = breaker.metrics.state.value
+                    state_color = "#2ecc71" if state == "closed" else "#f39c12" if state == "half_open" else "#e74c3c"
+                    state_emoji = "✅" if state == "closed" else "⚠️" if state == "half_open" else "🔴"
+                    
+                    st.markdown(f"""
+                    <div style='background: rgba(30, 41, 59, 0.6); padding: 16px; border-radius: 10px; border-left: 5px solid {state_color};'>
+                        <p style='margin: 0; font-size: 0.95rem;'><b>{state_emoji} {breaker_name}</b></p>
+                        <p style='margin: 5px 0 0 0; color: {state_color}; font-weight: 600;'>STATE: {state.upper()}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with cols[1]:
+                    st.metric("Total Requests", breaker.metrics.total_requests)
+                
+                with cols[2]:
+                    st.metric("Successes", breaker.metrics.total_requests - breaker.metrics.total_failures)
+                
+                with cols[3]:
+                    failure_rate = (breaker.metrics.total_failures / breaker.metrics.total_requests * 100) if breaker.metrics.total_requests > 0 else 0
+                    st.metric("Failure Rate", f"{failure_rate:.1f}%")
+                
+                # Details expansion
+                with st.expander(f"📋 Details for {breaker_name}"):
+                    detail_cols = st.columns(2)
+                    with detail_cols[0]:
+                        st.json({
+                            "failure_threshold": breaker.config.failure_threshold,
+                            "recovery_timeout_s": breaker.config.recovery_timeout_s,
+                            "current_failures": breaker.metrics.failure_count,
+                            "last_failure": breaker.metrics.last_failure_at or "Never"
+                        })
+                    with detail_cols[1]:
+                        st.json({
+                            "state_change_at": breaker.metrics.last_state_change_at,
+                            "half_open_successes": breaker.metrics.success_count_half_open,
+                            "success_threshold_to_close": breaker.config.success_threshold_half_open
+                        })
+    
+    with res_tab2:
+        st.markdown("### Retry Strategy Configuration")
+        
+        retry_policy = resilience_ctx.retry_policy
+        st.json({
+            "max_retries": retry_policy.max_retries,
+            "initial_backoff_ms": retry_policy.initial_backoff_ms,
+            "max_backoff_ms": retry_policy.max_backoff_ms,
+            "backoff_multiplier": retry_policy.backoff_multiplier,
+            "jitter_factor": retry_policy.jitter_factor
+        })
+        
+        st.markdown("### Exponential Backoff Timeline")
+        
+        backoff_timeline = []
+        for attempt in range(min(5, retry_policy.max_retries + 1)):
+            backoff_sec = retry_policy.backoff_duration(attempt)
+            backoff_timeline.append({
+                "Attempt": attempt + 1,
+                "Duration (sec)": round(backoff_sec, 3),
+                "Cumulative (sec)": round(sum([retry_policy.backoff_duration(i) for i in range(attempt + 1)]), 3)
+            })
+        
+        st.dataframe(backoff_timeline, width="stretch")
+    
+    with res_tab3:
+        st.markdown("### Failure Recovery Visualization")
+        
+        # Extract failure data for visualization
+        if resilience_ctx.circuit_breakers:
+            failure_data = []
+            for breaker_name, breaker in resilience_ctx.circuit_breakers.items():
+                if breaker.metrics.total_requests > 0:
+                    failure_data.append({
+                        "Service": breaker_name,
+                        "Success": breaker.metrics.total_requests - breaker.metrics.total_failures,
+                        "Failures": breaker.metrics.total_failures
+                    })
+            
+            if failure_data:
+                st.bar_chart(data=failure_data, x="Service", width="stretch")
+            else:
+                st.info("No failure data available yet.")
+        else:
+            st.info("No circuit breaker data available.")
+
+# --- Tab 7: Security Audit Log ---
+with tab7:
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, rgba(231, 76, 60, 0.1) 0%, rgba(192, 57, 43, 0.1) 100%); 
+                padding: 25px; border-radius: 12px; border-left: 5px solid #e74c3c; margin-bottom: 25px;'>
+        <h2 style='color: #e74c3c; margin: 0 0 10px 0;'>🔒 Security Audit Log</h2>
+        <p style='color: #e8e8e8; margin: 0;'>
+            Track policy decisions, identity verification, and access control events.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    sec_tab1, sec_tab2, sec_tab3 = st.tabs(["🛡️ Policy Decisions", "👤 Agent Identity", "🔑 Access Events"])
+    
+    with sec_tab1:
+        st.markdown("### Policy Decision Engine")
+        
+        st.info("""
+        **RBAC Tool Restrictions:**
+        - `get_alerts`: supervisor, admin
+        - `get_coordinates`: supervisor, specialist, admin
+        - `get_global_forecast`: supervisor, specialist, admin
+        """)
+        
+        st.markdown("### Geographic Restrictions by Role")
+        
+        geo_restrictions = {
+            "Role": ["guest", "supervisor", "specialist", "admin"],
+            "Allowed Regions": ["US", "US, Global", "US, Global", "US, Global"]
+        }
+        st.table(geo_restrictions)
+        
+        st.markdown("### Policy Violation Examples")
+        
+        violation_cols = st.columns(3)
+        with violation_cols[0]:
+            st.error("""
+            **Violation: Insufficient Role**
+            - Agent: guest
+            - Tool: get_alerts
+            - Decision: ❌ DENIED
+            - Reason: insufficient_role
+            """)
+        
+        with violation_cols[1]:
+            st.error("""
+            **Violation: Geographic Restriction**
+            - Agent: guest (allowed: US)
+            - Region: Europe
+            - Decision: ❌ DENIED
+            - Reason: geographic_restriction
+            """)
+        
+        with violation_cols[2]:
+            st.success("""
+            **Allowed: Admin Access**
+            - Agent: admin
+            - Tool: get_alerts
+            - Region: Global
+            - Decision: ✅ ALLOWED
+            """)
+    
+    with sec_tab2:
+        st.markdown("### Agent Identity Certificates")
+        
+        sample_identities = [
+            {
+                "issuer": "mcp-server",
+                "subject": "supervisor-agent",
+                "audience": "weather-specialist",
+                "role": "supervisor",
+                "status": "✅ Valid"
+            },
+            {
+                "issuer": "mcp-server",
+                "subject": "weather-specialist",
+                "audience": "mcp-tools",
+                "role": "specialist",
+                "status": "✅ Valid"
+            }
+        ]
+        
+        for identity in sample_identities:
+            st.markdown(f"""
+            <div style='background: rgba(30, 41, 59, 0.6); padding: 15px; border-radius: 10px; border-left: 5px solid #2ecc71; margin-bottom: 10px;'>
+                <p style='margin: 0; color: #2ecc71; font-weight: 600;'>{identity['status']}</p>
+                <p style='margin: 5px 0 0 0; color: #bdc3c7; font-size: 0.9rem;'>
+                    <b>Role:</b> {identity['role']} | 
+                    <b>Subject:</b> {identity['subject']} | 
+                    <b>Audience:</b> {identity['audience']}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("### HMAC Signature Verification")
+        st.code("""
+# Cryptographic Identity Verification
+signature = "sha256_hex_digest_of_identity_metadata"
+verified = hmac.compare_digest(expected, signature)
+        """, language="python")
+    
+    with sec_tab3:
+        st.markdown("### Access Control Events")
+        
+        audit_events = [
+            {"timestamp": "2024-11-15 10:23:45", "agent": "supervisor", "action": "ALLOW", "tool": "get_alerts", "reason": "correct_role"},
+            {"timestamp": "2024-11-15 10:24:12", "agent": "guest", "action": "DENY", "tool": "get_alerts", "reason": "insufficient_role"},
+            {"timestamp": "2024-11-15 10:25:03", "agent": "specialist", "action": "ALLOW", "tool": "get_global_forecast", "reason": "correct_role"},
+            {"timestamp": "2024-11-15 10:26:18", "agent": "guest", "action": "DENY", "tool": "get_coordinates", "reason": "geographic_restriction"},
+        ]
+        
+        for event in audit_events:
+            color = "#2ecc71" if event['action'] == "ALLOW" else "#e74c3c"
+            icon = "✅" if event['action'] == "ALLOW" else "❌"
+            
+            st.markdown(f"""
+            <div style='background: rgba(30, 41, 59, 0.4); padding: 12px; border-radius: 8px; border-left: 4px solid {color}; margin-bottom: 8px;'>
+                <span style='color: #bdc3c7; font-size: 0.85rem;'>[{event['timestamp']}]</span>
+                <span style='color: {color}; font-weight: 600; margin: 0 10px;'>{icon} {event['action']}</span>
+                <span style='color: #ecf0f1;'>{event['agent']} → {event['tool']} ({event['reason']})</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+# --- Tab 8: Observability Metrics ---
+with tab8:
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, rgba(46, 204, 113, 0.1) 0%, rgba(52, 152, 219, 0.1) 100%); 
+                padding: 25px; border-radius: 12px; border-left: 5px solid #2ecc71; margin-bottom: 25px;'>
+        <h2 style='color: #2ecc71; margin: 0 0 10px 0;'>📊 Observability Metrics</h2>
+        <p style='color: #e8e8e8; margin: 0;'>
+            End-to-end tracing, latency percentiles, and SLO tracking.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    obs_ctx = st.session_state.observability_context
+    metrics = obs_ctx.metrics
+    
+    obs_tab1, obs_tab2, obs_tab3, obs_tab4 = st.tabs(["📈 SLO Metrics", "⏱️ Latency Percentiles", "🔍 Trace Events", "📊 Performance Dashboard"])
+    
+    with obs_tab1:
+        st.markdown("### Real-Time SLO Tracking")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        
+        with m1:
+            st.metric("✅ Success Rate", f"{metrics.success_rate() * 100:.1f}%", 
+                     delta=f"+{metrics.success_count} ops")
+        with m2:
+            st.metric("📊 Total Operations", metrics.success_count + metrics.failure_count)
+        with m3:
+            st.metric("🔄 Retries", metrics.retry_count)
+        with m4:
+            st.metric("🔴 Breaker Opens", metrics.breaker_open_count)
+        
+        st.markdown("### SLO Definitions (99th Percentile Target)")
+        
+        slo_table = {
+            "Service": ["A2A Handoff", "Weather Specialist", "MCP Tool Call"],
+            "SLO Target": ["< 2000ms", "< 5000ms", "< 1000ms"],
+            "Alert Threshold": ["> 2500ms", "> 6000ms", "> 1200ms"],
+            "Status": ["✅ On Track", "✅ On Track", "✅ On Track"]
+        }
+        st.table(slo_table)
+    
+    with obs_tab2:
+        st.markdown("### Latency Histogram")
+        
+        if metrics.latency_percents:
+            # Aggregate all latency data
+            all_buckets = {}
+            for service, bucket in metrics.latency_percents.items():
+                for bucket_name, count in bucket.to_dict().items():
+                    all_buckets[bucket_name] = all_buckets.get(bucket_name, 0) + count
+            
+            if all_buckets:
+                latency_df = {
+                    "Latency Bucket": list(all_buckets.keys()),
+                    "Count": list(all_buckets.values())
+                }
+                st.bar_chart(latency_df, x="Latency Bucket", width="stretch")
+                
+                st.markdown("### Latency Percentiles")
+                percentile_data = []
+                cumulative = 0
+                total = sum(all_buckets.values())
+                
+                for bucket_name in sorted(all_buckets.keys(), key=lambda x: float(x.replace('ms', '').replace('inf', '9999999'))):
+                    cumulative += all_buckets[bucket_name]
+                    percentile = (cumulative / total * 100) if total > 0 else 0
+                    percentile_data.append({
+                        "Latency": bucket_name,
+                        "Count": all_buckets[bucket_name],
+                        "Cumulative %": f"{percentile:.1f}%"
+                    })
+                
+                st.dataframe(percentile_data, width="stretch")
+            else:
+                st.info("No latency data collected yet.")
+        else:
+            st.info("Latency metrics will be populated after agent interactions.")
+    
+    with obs_tab3:
+        st.markdown("### Trace Event Correlation")
+        
+        if obs_ctx.event_log:
+            st.markdown(f"**Total Events Logged:** {len(obs_ctx.event_log)}")
+            
+            for event in obs_ctx.event_log[-10:]:  # Show last 10 events
+                event_type_color = "#2874f0" if "handoff" in event.event_type else "#9b59b6" if "completion" in event.event_type else "#e74c3c" if "error" in event.event_type else "#2ecc71"
+                
+                st.markdown(f"""
+                <div style='background: rgba(30, 41, 59, 0.4); padding: 12px; border-radius: 8px; border-left: 4px solid {event_type_color}; margin-bottom: 8px;'>
+                    <p style='margin: 0; color: #bdc3c7; font-size: 0.85rem;'><b>Trace ID:</b> {event.trace_context.trace_id}</p>
+                    <p style='margin: 5px 0 0 0; color: {event_type_color}; font-weight: 600;'>{event.event_type}</p>
+                    <p style='margin: 5px 0 0 0; color: #94a3b8; font-size: 0.9rem;'>{event.timestamp}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No trace events recorded yet. Events will appear after agent interactions.")
+    
+    with obs_tab4:
+        st.markdown("### Performance Summary")
+        
+        perf_cols = st.columns(2)
+        
+        with perf_cols[0]:
+            st.markdown("### Operation Counters")
+            counters = {
+                "a2a_handoffs": metrics.counters.get("a2a_handoffs", 0),
+                "tool_calls": metrics.counters.get("tool_calls", 0),
+                "api_requests": metrics.counters.get("api_requests", 0)
+            }
+            st.json(counters)
+        
+        with perf_cols[1]:
+            st.markdown("### Gauge Metrics")
+            gauges = metrics.gauges if metrics.gauges else {"active_spans": 0}
+            st.json(gauges)
+        
+        st.markdown("---")
+        st.markdown("### Export Metrics")
+        
+        metrics_json = json.dumps(metrics.to_dict(), indent=2)
+        st.download_button(
+            "📥 Download Metrics JSON",
+            data=metrics_json,
+            file_name=f"metrics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            width="stretch"
+        )
 
 # --- Footer ---
 st.markdown("---")

@@ -66,6 +66,10 @@ Production-ready monitoring.
 | **Frontend** | **Streamlit** | Delivers a responsive, Python-native web interface. |
 | **Data Source** | **Open-Meteo API** | Provides high-precision weather data without API keys. |
 | **Audio** | **SpeechRecognition / WebRTC** | Handles voice-to-text conversion. |
+| **Resilience** | **Circuit Breaker + Retry Pattern** | Prevents cascading failures, handles transient errors. |
+| **Security** | **HMAC-SHA256 + RBAC + Policy Engine** | Cryptographic identity, role-based access, policy enforcement. |
+| **Observability** | **Structured Logging + Trace Context** | End-to-end trace correlation, SLO metrics, JSON event logs. |
+| **Persistence** | **SQLite WAL Mode** | Durable idempotency store, ACID guarantees. |
 
 ---
 

@@ -4,7 +4,7 @@
       "command": "mcp",
       "args": [
         "run",
-        "server/weather.py"
+        "/Users/sohanpatil/Downloads/MCP A2A Weather/server/weather.py"
       ]
     }
   }
